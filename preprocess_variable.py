@@ -38,7 +38,7 @@ class _Invdisttree:
         self.wn = 0
         self.wsum = None
 
-    def __call__( self, q, nnear=4, eps=0, p=2, weights=None ):
+    def __call__(self, q, nnear=4, eps=0, p=2, weights=None):
         '''
         - nnear: nearest neighbours of each query point
         - p: control weights of each neighbour point (1/disr**p)
@@ -101,6 +101,14 @@ class Preprocess_data:
             self.year_list = [self.year_start, ]
         if not os.path.exists(self.output_base_dir):
             os.makedirs(self.output_base_dir)  
+            
+        ## pop
+        self.pop_data_dir = os.path.join(self.output_base_dir, 'pop')
+        self.pop_data_list = os.listdir(self.pop_data_dir)
+        self.pop_data_path_oldest = os.path.join(self.pop_data_dir, min(self.pop_data_list))
+        self.pop_data_year_oldest = int(min(self.pop_data_list)[4:8])
+        self.pop_data_path_newest = os.path.join(self.pop_data_dir, max(self.pop_data_list))
+        self.pop_data_year_newest = int(max(self.pop_data_list)[4:8])
             
     def bilinear_imputation(self, lon, lat, data):
         '''
@@ -695,17 +703,6 @@ class Preprocess_data:
         df_fill = pd.concat([df_withAOD, df_withoutAOD], ignore_index=True)    
         df_fill = df_fill.drop(columns=['dist', 'idx', 'near_number'])
         return df_fill
-
-    def process_pop(self):
-        df = pd.read_csv(TAP_pop_raw_path)
-        df['row'] = self.grid_obj.lat_to_row(df['lat'])
-        df['col'] = self.grid_obj.lon_to_col(df['lon'])
-        df = df[['row', 'col', 'WP_2020']]
-        df.columns = ['row', 'col', 'pop']
-        # df = pd.merge(df, self.grid_obj.model_grid[['row', 'col']], on=['row', 'col'])
-        df = pd.merge(df, self.grid_obj.model_grid[['row', 'col']], on=['row', 'col'], how='outer')
-        df['pop'] = df['pop'].fillna(0)
-        df.to_csv(os.path.join(self.output_base_dir, 'pop.csv'), index=False)
     
     def deriving_daily_training_data(self, date, all_fire, current_index=0):
         process_dirname = [self.process_dependent_dir_name]+self.process_independent_dir_name
@@ -733,15 +730,27 @@ class Preprocess_data:
             os.makedirs(output_dir)
         for date in self.date_list:
             date = pd.to_datetime(date)
+            year = date.year
+            month = date.month
             dow = date.dayofweek
             if os.path.exists(os.path.join(output_dir, f"training_{date.strftime('%Y%m%d')}" + ".csv")):
                 continue
             print(f"processing: {date.strftime('%Y%m%d')}")
             try:
                 df = self.deriving_daily_training_data(date=date, all_fire=all_fire, current_index=0)
-                df_pop = pd.read_csv(os.path.join(self.output_base_dir, 'pop.csv'))
+                pop_data_path = os.path.join(self.pop_data_dir, f'pop_{year}.csv')
+                try:
+                    df_pop = pd.read_csv(pop_data_path)
+                except:
+                    if year > self.pop_data_year_newest:
+                        print(f"pop_{str(year)}.csv was not found, replaced by {self.pop_data_path_newest}") ## 使用最新的人口数据
+                        df_pop = pd.read_csv(self.pop_data_path_newest)
+                    if year < self.pop_data_year_oldest:
+                        print(f"pop_{str(year)}.csv was not found, replaced by {pop_data_path_oldest}") ## 使用最老的人口数据
+                        df_pop = pd.read_csv(pop_data_path_oldest)
                 df = pd.merge(df, df_pop, on=['row', 'col'])
-                df['dow'] = dow            
+                df['dow'] = dow  
+                df['month'] = month         
                 df.to_csv(os.path.join(output_dir, f"training_{date.strftime('%Y%m%d')}.csv"), index=False)
             except:
                 print(f"training data on {date.strftime('%Y%m%d')} cannot be derived")
@@ -793,10 +802,22 @@ class Preprocess_data:
         print(f"processing: {date.strftime('%Y%m%d')}")
         dow = date.dayofweek
         doy = date.dayofyear
+        month = date.month
+        year = date.year
         df = self.deriving_daily_prediction_data(date=date)
         df['doy'] = doy
         df['dow'] = dow
-        df_pop = pd.read_csv(os.path.join(self.output_base_dir, 'pop.csv'))
+        df['month'] = month
+        pop_data_path = os.path.join(self.pop_data_dir, f'pop_{year}.csv')
+        try:
+            df_pop = pd.read_csv(pop_data_path)
+        except:
+            if year > self.pop_data_year_newest:
+                print(f"pop_{str(year)}.csv was not found, replaced by {self.pop_data_path_newest}") ## 使用最新的人口数据
+                df_pop = pd.read_csv(self.pop_data_path_newest)
+            if year < self.pop_data_year_oldest:
+                print(f"pop_{str(year)}.csv was not found, replaced by {pop_data_path_oldest}") ## 使用最老的人口数据
+                df_pop = pd.read_csv(pop_data_path_oldest) 
         df = pd.merge(df, df_pop, on=['row', 'col'])
         df.to_csv(os.path.join(output_dir, f"prediction_{date.strftime('%Y%m%d')}.csv"), index=False)
         end_time = time.time()
@@ -831,9 +852,9 @@ class Preprocess_data:
             if all_fire:
                 df_GFAS = pd.read_csv(os.path.join(self.output_base_dir, var, 'GFAS', f"GC_{date.strftime('%Y%m%d')}" + ".csv"))
                 df_QFED = pd.read_csv(os.path.join(self.output_base_dir, var, 'QFED', f"GC_{date.strftime('%Y%m%d')}" + ".csv"))  
-                # df_GFED = pd.read_csv(os.path.join(self.output_base_dir, var, 'GFED', f"GC_{date.strftime('%Y%m%d')}" + ".csv")) 
+                df_GFED = pd.read_csv(os.path.join(self.output_base_dir, var, 'GFED', f"GC_{date.strftime('%Y%m%d')}" + ".csv")) 
                 df_nofire = pd.read_csv(os.path.join(self.output_base_dir, var, 'nofire', f"GC_{date.strftime('%Y%m%d')}" + ".csv")) 
-                # df = pd.merge(df_GFAS, df_GFED, on=['row', 'col', 'year', 'doy'])
+                df = pd.merge(df_GFAS, df_GFED, on=['row', 'col', 'year', 'doy'])
                 df = pd.merge(df_GFAS, df_QFED, on=['row', 'col', 'year', 'doy'])
                 df = pd.merge(df, df_nofire, on=['row', 'col', 'year', 'doy'])
             else:

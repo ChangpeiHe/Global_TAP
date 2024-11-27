@@ -19,11 +19,6 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 from base import *
 
-'''
-    此版本withaod用了全部的训练数据
-    第二阶段的模型用了直接算出来的high-index
-'''
-
 
 class Tap_RF_model:
     '''
@@ -51,16 +46,13 @@ class Tap_RF_model:
             training_data = pd.merge(training_data, self.process_obj.grid_obj.model_grid[['row', 'col']]).reset_index(drop=True)
         training_data = self.preprocess_training_dataset(training_data)
         self.training_dataset = training_data
-        # self.training_dataset = training_data.sample(frac=0.3, random_state=1).reset_index(drop=True)
         
         # build model
-        training_dataset_withAOD = self.training_dataset[self.training_dataset['aod'].notna()]
-        training_dataset_withoutAOD = self.training_dataset.drop(columns=['aod'])
+        training_dataset_withAOD = self.training_dataset[self.training_dataset['aod'].notna()].reset_index(drop=True)
+        training_dataset_withoutAOD = self.training_dataset[self.training_dataset['aod'].isna()].reset_index(drop=True)
         self.model_high_withAOD, self.model_pm_withAOD, df_withAOD_residual = self.build_base_model(training_dataset_withAOD, self.independent_v, self.dependent_v)
         self.model_high_withoutAOD, self.model_pm_withoutAOD, df_withoutAOD_residual = self.build_base_model(training_dataset_withoutAOD, self.independent_v_withoutAOD, self.dependent_v)
-        df_residual = pd.merge(df_withoutAOD_residual, df_withAOD_residual[['row', 'col', 'year', 'doy', 'pm_residual']], on=['row', 'col', 'year', 'doy'], how='outer')
-        df_residual['pm_residual'] = df_residual['pm_residual_y'].combine_first(df_residual['pm_residual_x'])
-        df_residual = df_residual.drop(columns=['pm_residual_x', 'pm_residual_y'])
+        df_residual = pd.concat([df_withAOD_residual, df_withoutAOD_residual], ignore_index=True)
         self.model_pm_residual_withfire, self.model_pm_residual_withoutfire = self.build_residual_model(df_residual, self.independent_v_residual, 'pm_residual')
         
         del training_dataset_withAOD
@@ -142,17 +134,12 @@ class Tap_RF_model:
         model_high = RandomForestClassifier(n_estimators=self.n_estimators, min_samples_leaf=self.min_samples_leaf, min_samples_split=self.min_samples_split, random_state=self.random_state, n_jobs=self.n_jobs, max_depth=self.max_depth, max_leaf_nodes=self.max_leaf_nodes)
         print(f"{len(df_train_smoke['high'])} samples are trained in high model")
         model_high.fit(df_train_smoke[independent_v], df_train_smoke['high'])
+        df_train['high'] = model_high.predict(df_train[independent_v])
         model_pm = RandomForestRegressor(n_estimators=self.n_estimators, min_samples_leaf=self.min_samples_leaf, min_samples_split=self.min_samples_split, random_state=self.random_state, n_jobs=self.n_jobs, max_depth=self.max_depth, max_leaf_nodes=self.max_leaf_nodes)
         X_train, y_train = df_train[independent_v + ['high']], df_train[dependent_v]
         print(f"{len(y_train)} samples are trained in pm model")
         model_pm.fit(X_train, y_train)
         data[dependent_v] = model_pm.predict(X_train)
-        ## use GC output to replace TAP output if GC > TAP（not use）
-        # if self.has_HMS:
-        #     index = (data[dependent_v] < data[pm25_GC]) & ((data['HMS_Density'] > 0) | (data['CombustionRate'] > 0))
-        # else:
-        #     index = (data[dependent_v] < data[pm25_GC]) & (data['CombustionRate'] > 0)
-        # data.loc[index, dependent_v] = data.loc[index, pm25_GC]
         data['pm_residual'] = y_train - data[dependent_v]
         data['fire'] = 0
         if self.has_HMS:
@@ -206,17 +193,6 @@ class Tap_RF_model:
             # step2: predict first-layer pm2.5
             data_withAOD[self.dependent_v] = model_pm_withAOD.predict(data_withAOD[self.independent_v+['high']])
             data_withoutAOD[self.dependent_v] = model_pm_withoutAOD.predict(data_withoutAOD[self.independent_v_withoutAOD+['high']])
-            ## use GC output to replace TAP output if GC > TAP（not use）
-            # if self.has_HMS:
-            #     withAOD_index = (data_withAOD[self.dependent_v] < data_withAOD[pm25_GC]) & ((data_withAOD['HMS_Density'] > 0) | (data_withAOD['CombustionRate'] > 0))
-            # else:
-            #     withAOD_index = (data_withAOD[self.dependent_v] < data_withAOD[pm25_GC]) & (data_withAOD['CombustionRate'] > 0)     
-            # data_withAOD.loc[withAOD_index, self.dependent_v] = data_withAOD.loc[withAOD_index, pm25_GC]
-            # if self.has_HMS:
-            #     withoutAOD_index = (data_withoutAOD[self.dependent_v] < data_withoutAOD[pm25_GC]) & ((data_withoutAOD['HMS_Density'] > 0) | (data_withoutAOD['CombustionRate'] > 0))
-            # else:
-            #     withoutAOD_index = (data_withoutAOD[self.dependent_v] < data_withoutAOD[pm25_GC]) & (data_withoutAOD['CombustionRate'] > 0)
-            # data_withoutAOD.loc[withoutAOD_index, self.dependent_v] = data_withoutAOD.loc[withoutAOD_index, pm25_GC]    
             df = pd.concat([data_withAOD, data_withoutAOD], ignore_index=True)
         else:
             data_withoutAOD['fire'] = 0
@@ -225,13 +201,7 @@ class Tap_RF_model:
             else:
                 data_withoutAOD.loc[data_withoutAOD['CombustionRate']>0, 'fire'] = 1           
             data_withoutAOD['high'] = model_high_withoutAOD.predict(data_withoutAOD[self.independent_v_withoutAOD])
-            data_withoutAOD[self.dependent_v] = model_pm_withoutAOD.predict(data_withoutAOD[self.independent_v_withoutAOD+['high']])
-            ## use GC output to replace TAP output if GC > TAP（not use）
-            # if self.has_HMS:
-            #     withoutAOD_index = (data_withoutAOD[self.dependent_v] < data_withoutAOD[pm25_GC]) & ((data_withoutAOD['HMS_Density'] > 0) | (data_withoutAOD['CombustionRate'] > 0))
-            # else:
-            #     withoutAOD_index = (data_withoutAOD[self.dependent_v] < data_withoutAOD[pm25_GC]) & (data_withoutAOD['CombustionRate'] > 0)
-            # data_withoutAOD.loc[withoutAOD_index, self.dependent_v] = data_withoutAOD.loc[withoutAOD_index, pm25_GC]    
+            data_withoutAOD[self.dependent_v] = model_pm_withoutAOD.predict(data_withoutAOD[self.independent_v_withoutAOD+['high']]) 
             df = data_withoutAOD   
         # step3: predict second-layer pm2.5 residuals
         data_withfire = df[df['fire']==1]
@@ -303,12 +273,10 @@ class Tap_RF_model:
             # build model
             df_train, df_test = self.training_dataset.iloc[train_index], self.training_dataset.iloc[test_index]
             training_dataset_withAOD = df_train[df_train['aod'].notna()]
-            training_dataset_withoutAOD = df_train.drop(columns=['aod'])
+            training_dataset_withoutAOD = df_train[df_train['aod'].isna()]
             model_high_withAOD, model_pm_withAOD, df_withAOD_residual = self.build_base_model(training_dataset_withAOD, self.independent_v, self.dependent_v)
             model_high_withoutAOD, model_pm_withoutAOD, df_withoutAOD_residual = self.build_base_model(training_dataset_withoutAOD, self.independent_v_withoutAOD, self.dependent_v)
-            df_residual = pd.merge(df_withoutAOD_residual, df_withAOD_residual[['row', 'col', 'year', 'doy', 'pm_residual']], on=['row', 'col', 'year', 'doy'], how='outer')
-            df_residual['pm_residual'] = df_residual['pm_residual_y'].combine_first(df_residual['pm_residual_x'])
-            df_residual = df_residual.drop(columns=['pm_residual_x', 'pm_residual_y'])            
+            df_residual = pd.concat([df_withAOD_residual, df_withoutAOD_residual], ignore_index=True)        
             model_pm_residual_withfire, model_pm_residual_withoutfire = self.build_residual_model(df_residual, self.independent_v_residual, 'pm_residual')
             # predict
             data = self.predict(df_test, model_high_withAOD, model_high_withoutAOD, model_pm_withAOD, model_pm_withoutAOD, model_pm_residual_withfire, model_pm_residual_withoutfire)
@@ -337,9 +305,7 @@ class Tap_RF_model:
             training_dataset_withoutAOD = df_train.drop(columns=['aod'])
             model_high_withAOD, model_pm_withAOD, df_withAOD_residual = self.build_base_model(training_dataset_withAOD, self.independent_v, self.dependent_v)
             model_high_withoutAOD, model_pm_withoutAOD, df_withoutAOD_residual = self.build_base_model(training_dataset_withoutAOD, self.independent_v_withoutAOD, self.dependent_v)
-            df_residual = pd.merge(df_withoutAOD_residual, df_withAOD_residual[['row', 'col', 'year', 'doy', 'pm_residual']], on=['row', 'col', 'year', 'doy'], how='outer')
-            df_residual['pm_residual'] = df_residual['pm_residual_y'].combine_first(df_residual['pm_residual_x'])
-            df_residual = df_residual.drop(columns=['pm_residual_x', 'pm_residual_y'])            
+            df_residual = pd.concat([df_withAOD_residual, df_withoutAOD_residual], ignore_index=True)     
             model_pm_residual_withfire, model_pm_residual_withoutfire = self.build_residual_model(df_residual, self.independent_v_residual, 'pm_residual')
             # predict
             data = self.predict(df_test, model_high_withAOD, model_high_withoutAOD, model_pm_withAOD, model_pm_withoutAOD, model_pm_residual_withfire, model_pm_residual_withoutfire)
@@ -355,10 +321,6 @@ class Tap_RF_model:
         kmeans = KMeans(n_clusters=n_cluster, n_init=25) # 75 clusters; 25 random initing
         df_grid_matched['Cluster'] = kmeans.fit_predict(df_grid_matched[['lon', 'lat']])
         df_grid_matched = pd.merge(self.training_dataset, df_grid_matched[['row', 'col', 'Cluster']], on=['row', 'col']) # training_dataset resorted by row and col
-        # plt.figure(figsize=(10, 6))
-        # sns.scatterplot(data=df_grid_matched, x='lon', y='lat', hue='Cluster', palette='viridis', s=100)
-        # plt.savefig('./cluster.png', dpi=300)
-        # plt.close()
         clusters = np.unique(df_grid_matched['Cluster'])
         y_ = df_grid_matched[self.dependent_v].values
         predictions = np.zeros_like(y_, dtype=float)        
@@ -371,9 +333,7 @@ class Tap_RF_model:
             training_dataset_withoutAOD = df_train.drop(columns=['aod'])
             model_high_withAOD, model_pm_withAOD, df_withAOD_residual = self.build_base_model(training_dataset_withAOD, self.independent_v, self.dependent_v)
             model_high_withoutAOD, model_pm_withoutAOD, df_withoutAOD_residual = self.build_base_model(training_dataset_withoutAOD, self.independent_v_withoutAOD, self.dependent_v)
-            df_residual = pd.merge(df_withoutAOD_residual, df_withAOD_residual[['row', 'col', 'year', 'doy', 'pm_residual']], on=['row', 'col', 'year', 'doy'], how='outer')
-            df_residual['pm_residual'] = df_residual['pm_residual_y'].combine_first(df_residual['pm_residual_x'])
-            df_residual = df_residual.drop(columns=['pm_residual_x', 'pm_residual_y'])            
+            df_residual = pd.concat([df_withAOD_residual, df_withoutAOD_residual], ignore_index=True)       
             model_pm_residual_withfire, model_pm_residual_withoutfire = self.build_residual_model(df_residual, self.independent_v_residual, 'pm_residual')
             # predict
             df_test = self.predict(df_test, model_high_withAOD, model_high_withoutAOD, model_pm_withAOD, model_pm_withoutAOD, model_pm_residual_withfire, model_pm_residual_withoutfire)
@@ -400,78 +360,3 @@ class Tap_RF_model:
         data = self.predict(df_train, self.model_high_withAOD, self.model_high_withoutAOD, self.model_pm_withAOD, self.model_pm_withoutAOD, self.model_pm_residual_withfire, self.model_pm_residual_withoutfire)
         df_train['pm25_pre'] = data[self.dependent_v]
         return df_train
-    
-    def CV_benchmark(self, n_fold):
-        kf = KFold(n_splits=n_fold, shuffle=True, random_state=self.random_state)
-        y_ = self.training_dataset[self.dependent_v].values
-        predictions = np.zeros_like(y_, dtype=float)        
-        for train_index, test_index in kf.split(self.training_dataset):
-            # build model
-            df_train, df_test = self.training_dataset.iloc[train_index], self.training_dataset.iloc[test_index]
-            training_dataset_withAOD = df_train[df_train['aod'].notna()]
-            training_dataset_withoutAOD = df_train.drop(columns=['aod'])
-            model_pm_withAOD = self.build_benchmark_base_model(training_dataset_withAOD, self.independent_v, self.dependent_v)
-            model_pm_withoutAOD = self.build_benchmark_base_model(training_dataset_withoutAOD, self.independent_v_withoutAOD, self.dependent_v)
-            # predict
-            data_withAOD = df_test[df_test['aod'].notna()]
-            data_withoutAOD = df_test[df_test['aod'].isna()]
-            data_withoutAOD = data_withoutAOD.drop(columns=['aod'])
-            data_withAOD['pm25_pre'] = model_pm_withAOD.predict(data_withAOD[self.independent_v])
-            data_withoutAOD['pm25_pre'] = model_pm_withoutAOD.predict(data_withoutAOD[self.independent_v_withoutAOD])
-            df = pd.concat([data_withAOD, data_withoutAOD], ignore_index=True)
-            df = df[['row', 'col', 'year', 'doy', 'pm25_pre']]
-            df_test = pd.merge(df_test, df, on=['row', 'col', 'year', 'doy'])
-            predictions[test_index] = df_test['pm25_pre'].values
-        CV_df = self.training_dataset.copy(deep=True)
-        CV_df['pm25_pre'] = predictions
-        return CV_df
-        
-    def fit_performance_Benchmark(self):
-        df_train = self.training_dataset.copy(deep=True) # deep=True, self.training_dataset can not be modified
-        training_dataset_withAOD = df_train[df_train['aod'].notna()]
-        training_dataset_withoutAOD = df_train.drop(columns=['aod'])  
-        model_pm_withAOD = self.build_benchmark_base_model(training_dataset_withAOD, self.independent_v, self.dependent_v)
-        model_pm_withoutAOD = self.build_benchmark_base_model(training_dataset_withoutAOD, self.independent_v_withoutAOD, self.dependent_v)
-        training_dataset_withAOD['pm25_pre'] = model_pm_withAOD.predict(training_dataset_withAOD[self.independent_v])
-        training_dataset_withoutAOD['pm25_pre'] = model_pm_withoutAOD.predict(training_dataset_withoutAOD[self.independent_v_withoutAOD])   
-        data = pd.merge(training_dataset_withAOD, training_dataset_withoutAOD[['row', 'col', 'year', 'doy', 'pm25_pre']], on=['row', 'col', 'year', 'doy'], how='outer')
-        data['pm25_pre'] = data['pm25_pre_x'].combine_first(data['pm25_pre_y'])
-        data = data.drop(columns=['pm25_pre_x', 'pm25_pre_y'])  
-        data = pd.merge(df_train, data[['row', 'col', 'year', 'doy', 'pm25_pre']], on=['row', 'col', 'year', 'doy'])
-        return data
-    
-    # def CV_benchmark_withAOD(self, n_fold):
-    #     df_cv = self.training_dataset[self.training_dataset['aod'].notna()].reset_index(drop=True)         
-    #     kf = KFold(n_splits=n_fold)
-    #     y_ = df_cv[self.dependent_v].values
-    #     predictions = np.zeros_like(y_, dtype=float)   
-    #     for train_index, test_index in kf.split(df_cv):
-    #         # build model
-    #         df_train, df_test = df_cv.iloc[train_index], df_cv.iloc[test_index]
-    #         model_pm_withAOD = self.build_benchmark_base_model(df_train, self.independent_v, self.dependent_v)
-    #         # predict
-    #         df_test['pm25_pre'] = model_pm_withAOD.predict(df_test[self.independent_v])
-    #         predictions[test_index] = df_test['pm25_pre'].values
-    #     return predictions  
-      
-    # def CV_benchmark_withoutAOD(self, n_fold):
-    #     kf = KFold(n_splits=n_fold)
-    #     y_ = self.training_dataset[self.dependent_v].values
-    #     predictions = np.zeros_like(y_, dtype=float)        
-    #     for train_index, test_index in kf.split(self.training_dataset):
-    #         # build model
-    #         df_train, df_test = self.training_dataset.iloc[train_index], self.training_dataset.iloc[test_index]
-    #         training_dataset_withoutAOD = df_train.drop(columns=['aod'])
-    #         model_pm_withoutAOD = self.build_benchmark_base_model(training_dataset_withoutAOD, self.independent_v_withoutAOD, self.dependent_v)
-    #         # predict
-    #         df_test = df_test.drop(columns=['aod'])
-    #         df_test['pm25_pre'] = model_pm_withoutAOD.predict(df_test[self.independent_v_withoutAOD])
-    #         predictions[test_index] = df_test['pm25_pre'].values
-    #     return predictions     
-
-                    
-
-    
-    
-    
-    
